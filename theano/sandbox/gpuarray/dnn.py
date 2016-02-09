@@ -12,19 +12,17 @@ from theano.gof.cmodule import GCC_compiler
 from theano.gof.type import CDataType, Generic
 from theano.compile import optdb
 from theano.compile.ops import shape_i
-from theano.tensor.nnet import SoftmaxGrad
+from theano.tensor.nnet import LogSoftmax, SoftmaxGrad
 from theano.tensor.nnet.abstract_conv import (AbstractConv2d,
                                               AbstractConv2d_gradWeights,
                                               AbstractConv2d_gradInputs,
                                               get_conv_output_shape)
-from theano.tensor.signal.downsample import (DownsampleFactorMax,
-                                             MaxPoolGrad, AveragePoolGrad)
-
+from theano.tensor.signal.pool import (
+    Pool, MaxPoolGrad, AveragePoolGrad)
 from . import pygpu
 from .type import get_context, gpu_context_type, list_contexts, GpuArrayType
 from .basic_ops import (as_gpuarray_variable, infer_context_name,
-                        gpu_contiguous, HostFromGpu,
-                        GpuAllocEmpty, empty_like)
+                        gpu_contiguous, GpuAllocEmpty, empty_like)
 from .elemwise import GpuElemwise
 
 # These don't exist in gpuarray
@@ -87,6 +85,9 @@ def _dnn_check_version():
 def dnn_present():
     if dnn_present.avail is not None:
         return dnn_present.avail
+    if config.dnn.enabled == "False":
+        dnn_present.msg = "disabled by dnn.enabled flag"
+        dnn_present.avail = False
 
     if pygpu is None:
         dnn_present.msg = "PyGPU not available"
@@ -98,6 +99,12 @@ def dnn_present():
         dnn_present.avail, dnn_present.msg = _dnn_check_version()
         if not dnn_present.avail:
             raise RuntimeError(dnn_present.msg)
+
+    if config.dnn.enabled == "True":
+        if not dnn_present.avail:
+            raise RuntimeError(
+                "You enabled CuDNN, but we aren't able to use it: %s" %
+                dnn_present.msg)
 
     return dnn_present.avail
 
@@ -264,10 +271,10 @@ class GpuDnnConvDesc(COp):
             assert len(border_mode) == len(subsample)
             border_mode = tuple(map(int, border_mode))
         if not ((isinstance(border_mode, tuple) and min(border_mode) >= 0) or
-                border_mode in ('valid', 'full')):
+                border_mode in ('valid', 'full', 'half')):
             raise ValueError(
                 'invalid border_mode {}, which must be either '
-                '"valid", "full", an integer or a pair of'
+                '"valid", "full", "half", an integer or a pair of'
                 ' integers'.format(border_mode))
         self.border_mode = border_mode
         assert len(subsample) in (2, 3)
@@ -295,9 +302,11 @@ class GpuDnnConvDesc(COp):
             pad1 = str(self.border_mode[1])
             if len(self.border_mode) > 2:
                 pad2 = str(self.border_mode[2])
-            bmode = '2'
+            bmode = '1'
         elif self.border_mode == "valid":
             bmode = '1'
+        elif self.border_mode == "half":
+            bmode = '2'
         elif self.border_mode == "full":
             bmode = '0'
         else:
@@ -782,7 +791,7 @@ def dnn_conv(img, kerns, border_mode='valid', subsample=(1, 1),
     kerns
         Convolution filters.
     border_mode
-        One of 'valid', 'full'; additionally, the padding size
+        One of 'valid', 'full', 'half'; additionally, the padding size
         could be directly specified by an integer or a pair of integers.
     subsample
         Perform subsampling of the output (default: (1, 1)).
@@ -882,6 +891,8 @@ def dnn_conv(img, kerns, border_mode='valid', subsample=(1, 1),
 def dnn_gradweight(img, topgrad, kerns_shp, border_mode='valid',
                    subsample=(1, 1), conv_mode='conv'):
     ctx_name = infer_context_name(img, topgrad)
+    img = as_gpuarray_variable(img, ctx_name)
+    topgrad = as_gpuarray_variable(topgrad, ctx_name)
     img = gpu_contiguous(img)
     topgrad = gpu_contiguous(topgrad)
     kerns_shp = as_tensor_variable(kerns_shp)
@@ -894,6 +905,8 @@ def dnn_gradweight(img, topgrad, kerns_shp, border_mode='valid',
 def dnn_gradinput(kerns, topgrad, img_shp, border_mode='valid',
                   subsample=(1, 1), conv_mode='conv'):
     ctx_name = infer_context_name(kerns, topgrad)
+    kerns = as_gpuarray_variable(kerns, ctx_name)
+    topgrad = as_gpuarray_variable(topgrad, ctx_name)
     kerns = gpu_contiguous(kerns)
     topgrad = gpu_contiguous(topgrad)
     img_shp = as_tensor_variable(img_shp)
@@ -954,6 +967,9 @@ class GpuDnnPoolDesc(Op):
 
         if self.get_ndim() == 3 and version() < 3000:
             raise RuntimeError("CuDNN 3d pooling requires v3")
+        if mode == 'average_exc_pad' and max(pad) > 0 and version() < 4004:
+            raise RuntimeError(
+                "CuDNN pooling mode 'average_exc_pad' requires at least v4")
 
     def get_ndim(self):
         return len(self.ws)
@@ -1168,8 +1184,9 @@ class GpuDnnSoftmaxBase(DnnBase):
     Parameters
     ----------
     algo
-        'fast' or 'accurate' indicating whether computations should be
-        optimized for speed or accuracy respectively.
+        'fast', 'accurate' or 'log' indicating whether, respectively,
+        computations should be optimized for speed, for accuracy, or if CuDNN
+        should rather compute the log-softmax instead.
     mode
         'instance' or 'channel' indicating whether the softmax should be
         computed per image across 'c01' or per spatial location '01' per
@@ -1217,8 +1234,9 @@ class GpuDnnSoftmax(GpuDnnSoftmaxBase):
     Op for the cuDNN Softmax.
 
     algo
-        'fast' or 'accurate' indicating whether computations should be
-        optimized for speed or accuracy respectively.
+        'fast', 'accurate' or 'log' indicating whether, respectively,
+        computations should be optimized for speed, for accuracy, or if CuDNN
+        should rather compute the log-softmax instead.
     mode
         'instance' or 'channel' indicating whether the softmax should be
         computed per image across 'c01' or per spatial location '01' per
@@ -1251,8 +1269,9 @@ class GpuDnnSoftmaxGrad(GpuDnnSoftmaxBase):
     Parameters
     ----------
     algo
-        'fast' or 'accurate' indicating whether computations should be
-        optimized for speed or accuracy respectively.
+        'fast', 'accurate' or 'log' indicating whether, respectively,
+        computations should be optimized for speed, for accuracy, or if CuDNN
+        should rather compute the gradient of the log-softmax instead.
     mode
         'instance' or 'channel' indicating whether the softmax should
         be computed per image across 'c01' or per spatial location '01' per
@@ -1275,17 +1294,16 @@ class GpuDnnSoftmaxGrad(GpuDnnSoftmaxBase):
 @local_optimizer([AbstractConv2d, AbstractConv2d_gradWeights,
                   AbstractConv2d_gradInputs])
 def local_abstractconv_cudnn(node):
-    if (not isinstance(node.op, (AbstractConv2d, AbstractConv2d_gradWeights,
+    if (not isinstance(node.op, (AbstractConv2d,
+                                 AbstractConv2d_gradWeights,
                                  AbstractConv2d_gradInputs))):
         return None
+
     inp1 = node.inputs[0]
     inp2 = node.inputs[1]
 
     if (not isinstance(inp1.type, GpuArrayType) or
-            not isinstance(inp2.type, GpuArrayType)):
-        return None
-
-    if not dnn_available(inp1.type.context_name):
+            not dnn_available(inp1.type.context_name)):
         return None
 
     if node.op.filter_flip:
@@ -1383,19 +1401,19 @@ def local_dnn_convi_output_merge(node, *inputs):
 
 
 @register_opt('cudnn')
-@op_lifter([DownsampleFactorMax])
+@op_lifter([Pool])
 def local_pool_dnn_alternative(node, ctx_name):
     if not dnn_available(ctx_name):
         return
     if not node.op.ignore_border:
         return
     img, = node.inputs
+    img = as_gpuarray_variable(img, ctx_name)
     ds = node.op.ds
     stride = node.op.st
     pad = node.op.padding
     mode = node.op.mode
-    return dnn_pool(gpu_contiguous(img.owner.inputs[0]),
-                    ds, stride=stride, pad=pad, mode=mode)
+    return dnn_pool(gpu_contiguous(img), ds, stride=stride, pad=pad, mode=mode)
 
 
 @register_opt('cudnn')
@@ -1406,6 +1424,9 @@ def local_pool_dnn_grad_stride(node, ctx_name):
     if not node.op.ignore_border:
         return
     inp, out, out_grad = node.inputs
+    inp = as_gpuarray_variable(inp, ctx_name)
+    out = as_gpuarray_variable(out, ctx_name)
+    out_grad = as_gpuarray_variable(out_grad, ctx_name)
     ds = node.op.ds
     st = node.op.st
     pad = node.op.padding
@@ -1426,6 +1447,8 @@ def local_avg_pool_dnn_grad_stride(node, ctx_name):
     if not node.op.ignore_border:
         return
     inp, out_grad = node.inputs
+    inp = as_gpuarray_variable(inp, ctx_name)
+    out_grad = as_gpuarray_variable(out_grad, ctx_name)
     ds = node.op.ds
     st = node.op.st
     pad = node.op.padding
@@ -1470,6 +1493,25 @@ def local_log_softmax_dnn(node):
         return [new_softmax(softmax_node.inputs[0])]
 
 
+@register_opt('cudnn')
+@op_lifter([LogSoftmax])
+def local_logsoftmax_to_dnn(node, ctx_name):
+    if not dnn_available(ctx_name) or version() < 3000:
+        # No log-softmax before cudnn v3
+        return
+
+    # Transform the input in the format expected by GpuDnnSoftmax
+    inp = node.inputs[0]
+    if inp.ndim != 2:
+        return
+    inp = inp.dimshuffle(0, 1, 'x', 'x')
+    inp.tag.context_name = ctx_name
+
+    # Apply GpuDnnSoftmax and return the result
+    out = GpuDnnSoftmax('log', 'channel')(gpu_contiguous(inp))
+    return [out.dimshuffle(0, 1)]
+
+
 class NoCuDNNRaise(Optimizer):
     def apply(self, fgraph):
         """
@@ -1495,8 +1537,7 @@ def local_softmax_dnn_grad(node, ctx_name):
         return
     ins = []
     for n in node.inputs:
-        if isinstance(n.owner.op, HostFromGpu):
-            n = n.owner.inputs[0]
+        n = as_gpuarray_variable(n, ctx_name)
         if n.ndim != 2:
             return
         ins.append(n.dimshuffle(0, 1, 'x', 'x'))

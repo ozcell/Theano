@@ -15,7 +15,7 @@ from theano.sandbox.cuda.basic_ops import (as_cuda_ndarray_variable,
 from theano.tensor import as_tensor_variable
 
 
-class BatchedDotOp(GpuOp):
+class GpuBatchedDot(GpuOp):
     __props__ = ()
 
     def make_node(self, inp1, inp2):
@@ -212,7 +212,12 @@ class BatchedDotOp(GpuOp):
     def c_code_cache_version(self):
         return (1,)
 
-batched_dot = BatchedDotOp()
+    def infer_shape(self, node, shapes):
+        xshp, yshp = shapes
+        return [xshp[:-1] + yshp[2:]]
+
+batched_dot = GpuBatchedDot()
+BatchedDotOp = GpuBatchedDot()
 """
 Call cublasSgemmBatched. Take 2 3d tensor as input.
 """
@@ -1943,10 +1948,8 @@ class GpuConv(GpuOp):
                      images[2] * images[3] * 2)
         return flops
 
-    def make_thunk(self, node, storage_map, compute_map, no_recycling):
-        node_ = copy.copy(node)
-        assert node.op is node_.op
-        if node_.op.max_threads_dim0 is None:
+    def prepare_node(self, node):
+        if node.op.max_threads_dim0 is None:
             cuda = theano.sandbox.cuda
             device_id = cuda.use.device_number
             if device_id is None:
@@ -1959,9 +1962,7 @@ class GpuConv(GpuOp):
                 device_id = cuda.use.device_number
             cuda_ndarray = theano.sandbox.cuda.cuda_ndarray.cuda_ndarray
             prop = cuda_ndarray.device_properties(device_id)
-            node_.op.max_threads_dim0 = prop['maxThreadsDim0']
-        return super(GpuConv, node_.op).make_thunk(node_, storage_map,
-                                                   compute_map, no_recycling)
+            node.op.max_threads_dim0 = prop['maxThreadsDim0']
 
     def c_compile_args(self):
         nb = 0
