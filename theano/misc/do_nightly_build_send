@@ -1,5 +1,6 @@
 #!/bin/env python
 # Import smtplib for the actual sending function
+from __future__ import absolute_import, print_function, division
 import smtplib
 import os.path
 import sys
@@ -51,8 +52,8 @@ def mysend(subject, file):
     
     # Open the files in binary mode.  Let the MIMEImage class automatically
     # guess the specific image type.
-    fp = open(file, 'rb')
-    s=fp.read()
+    with open(file, 'rb') as fp:
+        s=fp.read()
     failures=0
     errors=0
     ran=False
@@ -115,7 +116,6 @@ def mysend(subject, file):
     s = ("Summary of the output:\n\n" + filter_output(open(file)) +
          "\n\nFull output:\n\n" + s)
     img = MIMEText(s)
-    fp.close()
     msg.attach(img)
     
 # Send the email via our own SMTP server.

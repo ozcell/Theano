@@ -1,18 +1,18 @@
 """Define random number Type (`RandomStateType`) and Op (`RandomFunction`)."""
-from __future__ import print_function
+from __future__ import absolute_import, print_function, division
 
 import sys
 from copy import copy
 
 import numpy
+from six import string_types
+from six.moves import reduce, xrange
 
 # local imports
 import theano
-from six.moves import reduce, xrange
 from theano import tensor
 from theano.tensor import opt
 from theano import gof
-from six import string_types
 from theano.compile import optdb
 
 __docformat__ = "restructuredtext en"
@@ -184,7 +184,7 @@ class RandomFunction(gof.Op):
         """
         shape_ = tensor.as_tensor_variable(shape, ndim=1)
         if shape == ():
-            shape = shape_.astype('int32')
+            shape = shape_.astype('int64')
         else:
             shape = shape_
         assert shape.type.ndim == 1
@@ -363,7 +363,7 @@ def _infer_ndim_bcast(ndim, shape, *args):
         # post-condition: shape may still contain both symbolic and
         # non-symbolic things
         if len(pre_v_shape) == 0:
-            v_shape = tensor.constant([], dtype='int32')
+            v_shape = tensor.constant([], dtype='int64')
         else:
             v_shape = tensor.stack(pre_v_shape)
 
@@ -402,7 +402,7 @@ def _infer_ndim_bcast(ndim, shape, *args):
             (ndim, args_ndim), args)
 
     assert ndim == len(bcast)
-    return ndim, tensor.cast(v_shape, 'int32'), tuple(bcast)
+    return ndim, tensor.cast(v_shape, 'int64'), tuple(bcast)
 
 
 def _generate_broadcasting_indices(out_shape, *shapes):
@@ -521,12 +521,11 @@ def binomial(random_state, size=None, n=1, p=0.5, ndim=None,
     p = tensor.as_tensor_variable(p)
     ndim, size, bcast = _infer_ndim_bcast(ndim, size, n, p)
     if n.dtype == 'int64':
-        # THIS WORKS AROUND A NUMPY BUG on 32bit machine
-        # Erase when the following works on a 32bit machine:
-        # numpy.random.binomial(
-        #          n=numpy.asarray([2,3,4], dtype='int64'),
-        #          p=numpy.asarray([.1, .2, .3], dtype='float64'))
-        n = tensor.cast(n, 'int32')
+        try:
+            numpy.random.binomial(n=numpy.asarray([2, 3, 4], dtype='int64'), p=numpy.asarray([.1, .2, .3], dtype='float64'))
+        except TypeError:
+            # THIS WORKS AROUND A NUMPY BUG on 32bit machine
+            n = tensor.cast(n, 'int32')
     op = RandomFunction('binomial',
                         tensor.TensorType(dtype=dtype,
                                           broadcastable=(False,) * ndim))
