@@ -7,6 +7,7 @@ from tempfile import mkdtemp
 import time
 import unittest
 import copy
+from collections import OrderedDict
 
 import six.moves.cPickle as pickle
 from six.moves import xrange
@@ -23,7 +24,7 @@ from theano.compile.pfunc import rebuild_collect_shared
 from theano.tests import unittest_tools as utt
 import theano.scalar.sharedvar
 from theano.scan_module.scan_op import Scan
-from theano.compat import PY3, OrderedDict
+from theano.compat import PY3
 from theano.tests.unittest_tools import attr
 
 
@@ -4829,7 +4830,7 @@ class ScanGpuTests:
         # The grad scan is always the 2nd one according to toposort. If the
         # optimization has been applied, it has 2 outputs, otherwise 3.
         grad_scan_node = scan_nodes[1]
-        assert len(grad_scan_node.outputs) == 2
+        assert len(grad_scan_node.outputs) == 2, len(grad_scan_node.outputs)
 
         # Call the theano function to ensure the absence of a memory error
         feval_backprop(numpy.zeros((mb_length, mb_size, n_in),
@@ -4939,7 +4940,7 @@ class T_Scan_Gpuarray(unittest.TestCase, ScanGpuTests):
     """
 
     def __init__(self, *args, **kwargs):
-        from theano.sandbox import gpuarray
+        from theano import gpuarray
         self.gpu_backend = gpuarray
 
         # This is unfortunate, but required

@@ -5,6 +5,7 @@ Generate and compile C modules for Python.
 from __future__ import absolute_import, print_function, division
 
 import atexit
+import textwrap
 import six.moves.cPickle as pickle
 import logging
 import os
@@ -24,6 +25,7 @@ import numpy.distutils  # TODO: TensorType should handle this
 import theano
 from theano.compat import PY3, decode, decode_iter
 from six import b, BytesIO, StringIO, string_types, iteritems
+from six.moves import xrange
 from theano.gof.utils import flatten
 from theano.configparser import config
 from theano.gof.utils import hash_from_code
@@ -125,6 +127,7 @@ class ExtFunction(object):
 
 
 class DynamicModule(object):
+
     def __init__(self, name=None):
         assert name is None, (
             "The 'name' parameter of DynamicModule"
@@ -1471,10 +1474,25 @@ class ModuleCache(object):
 
 def _rmtree(parent, ignore_nocleanup=False, msg='', level=logging.DEBUG,
             ignore_if_missing=False):
-    # On NFS filesystems, it is impossible to delete a directory with open
-    # files in it.  So instead, some commands in this file will respond to a
-    # failed rmtree() by touching a 'delete.me' file.  This file is a message
-    # for a future process to try deleting the directory.
+    """
+    On NFS filesystems, it is impossible to delete a directory with open
+    files in it.
+
+    So instead, some commands in this file will respond to a
+    failed rmtree() by touching a 'delete.me' file.  This file is a message
+    for a future process to try deleting the directory.
+
+    Parameters:
+    ----------
+    parent
+        Root node to start deleting from
+    ignore_nocleanup
+        Delete the tree if flag is TRUE
+    level
+        Python Logging level. Set to "DEBUG" by default
+    ignore_if_missing
+        If set to True, just return without any issue if parent is NULL
+    """
     if ignore_if_missing and not os.path.exists(parent):
         return
     try:
@@ -1501,6 +1519,7 @@ _module_cache = None
 
 def get_module_cache(dirname, init_args=None):
     """
+    Create a new module_cache with the (k, v) pairs in this dictionary
 
     Parameters
     ----------
@@ -1788,6 +1807,34 @@ class Compiler(object):
                                          output=output, compiler=compiler)
 
 
+def try_march_flag(flags):
+    """
+        Try to compile and run a simple C snippet using current flags.
+        Return: compilation success (True/False), execution success (True/False)
+    """
+    test_code = textwrap.dedent("""\
+            #include <cmath>
+            using namespace std;
+            int main(int argc, char** argv)
+            {
+                float Nx = -1.3787706641;
+                float Sx = 25.0;
+                double r = Nx + sqrt(Sx);
+                if (abs(r - 3.621229) > 0.01)
+                {
+                    return -1;
+                }
+                return 0;
+            }
+            """)
+
+    cflags = flags + ['-L' + d for d in theano.gof.cmodule.std_lib_dirs()]
+    compilation_result, execution_result = GCC_compiler.try_compile_tmp(
+        test_code, tmp_prefix='try_march_',
+        flags=cflags, try_run=True)
+    return compilation_result, execution_result
+
+
 class GCC_compiler(Compiler):
     # The equivalent flags of --march=native used by g++.
     march_flags = None
@@ -1799,7 +1846,7 @@ class GCC_compiler(Compiler):
         return theano.config.cxx + " " + gcc_version_str
 
     @staticmethod
-    def compile_args():
+    def compile_args(march_flags=True):
         cxxflags = [flag for flag in config.gcc.cxxflags.split(' ') if flag]
 
         # Add the equivalent of -march=native flag.  We can't use
@@ -1810,7 +1857,7 @@ class GCC_compiler(Compiler):
         # Those URL discuss how to find witch flags are used by -march=native.
         # http://en.gentoo-wiki.com/wiki/Safe_Cflags#-march.3Dnative
         # http://en.gentoo-wiki.com/wiki/Hardware_CFLAGS
-        detect_march = GCC_compiler.march_flags is None
+        detect_march = GCC_compiler.march_flags is None and march_flags
         if detect_march:
             for f in cxxflags:
                 # If the user give an -march=X parameter, don't add one ourself
@@ -1825,7 +1872,9 @@ class GCC_compiler(Compiler):
                     break
 
         if ('g++' not in theano.config.cxx and
-                'clang++' not in theano.config.cxx):
+                'clang++' not in theano.config.cxx and
+                'clang-omp++' not in theano.config.cxx and
+                'icpc' not in theano.config.cxx):
             _logger.warn(
                 "OPTIMIZATION WARNING: your Theano flag `cxx` seems not to be"
                 " the g++ compiler. So we disable the compiler optimization"
@@ -2007,8 +2056,56 @@ class GCC_compiler(Compiler):
                     _logger.info("g++ -march=native equivalent flags: %s",
                                  GCC_compiler.march_flags)
 
+            # Find working march flag:
+            #   -- if current GCC_compiler.march_flags works, we're done.
+            #   -- else replace -march and -mtune with ['core-i7-avx', 'core-i7', 'core2']
+            #      and retry with all other flags and arguments intact.
+            #   -- else remove all other flags and only try with -march = default + flags_to_try.
+            #   -- if none of that worked, set GCC_compiler.march_flags = [] (for x86).
+
+            default_compilation_result, default_execution_result = try_march_flag(GCC_compiler.march_flags)
+            if not default_compilation_result or not default_execution_result:
+                march_success = False
+                march_ind = None
+                mtune_ind = None
+                default_detected_flag = []
+                march_flags_to_try = ['corei7-avx', 'corei7', 'core2']
+
+                for m_ in xrange(len(GCC_compiler.march_flags)):
+                    march_flag = GCC_compiler.march_flags[m_]
+                    if 'march' in march_flag:
+                        march_ind = m_
+                        default_detected_flag = [march_flag]
+                    elif 'mtune' in march_flag:
+                        mtune_ind = m_
+
+                for march_flag in march_flags_to_try:
+                    if march_ind is not None:
+                        GCC_compiler.march_flags[march_ind] = '-march=' + march_flag
+                    if mtune_ind is not None:
+                        GCC_compiler.march_flags[mtune_ind] = '-mtune=' + march_flag
+
+                    compilation_result, execution_result = try_march_flag(GCC_compiler.march_flags)
+
+                    if compilation_result and execution_result:
+                        march_success = True
+                        break
+
+                if not march_success:
+                    # perhaps one of the other flags was problematic; try default flag in isolation again:
+                    march_flags_to_try = default_detected_flag + march_flags_to_try
+                    for march_flag in march_flags_to_try:
+                        compilation_result, execution_result = try_march_flag(['-march=' + march_flag])
+                        if compilation_result and execution_result:
+                            march_success = True
+                            GCC_compiler.march_flags = ['-march=' + march_flag]
+                            break
+
+                if not march_success:
+                    GCC_compiler.march_flags = []
+
         # Add the detected -march=native equivalent flags
-        if GCC_compiler.march_flags:
+        if march_flags and GCC_compiler.march_flags:
             cxxflags.extend(GCC_compiler.march_flags)
 
         # NumPy 1.7 Deprecate the old API. I updated most of the places
@@ -2079,7 +2176,6 @@ class GCC_compiler(Compiler):
                     include_dirs=None, lib_dirs=None, libs=None,
                     preargs=None, py_module=True, hide_symbols=True):
         """
-
         Parameters
         ----------
         module_name : str
@@ -2155,7 +2251,10 @@ class GCC_compiler(Compiler):
             cmd.extend(p for p in preargs if not p.startswith('-O'))
         else:
             cmd.extend(preargs)
-        cmd.extend('-I%s' % idir for idir in include_dirs)
+        # to support path that includes spaces, we need to wrap it with double quotes on Windows
+        path_wrapper = "\"" if os.name == 'nt' else ""
+        cmd.extend(['-I%s%s%s' % (path_wrapper, idir, path_wrapper) for idir in include_dirs])
+        cmd.extend(['-L%s%s%s' % (path_wrapper, ldir, path_wrapper) for ldir in lib_dirs])
         if hide_symbols and sys.platform != 'win32':
             # This has been available since gcc 4.0 so we suppose it
             # is always available. We pass it here since it
@@ -2166,7 +2265,6 @@ class GCC_compiler(Compiler):
             cmd.append('-fvisibility=hidden')
         cmd.extend(['-o', lib_filename])
         cmd.append(cppfilename)
-        cmd.extend(['-L%s' % ldir for ldir in lib_dirs])
         cmd.extend(['-l%s' % l for l in libs])
         # print >> sys.stderr, 'COMPILING W CMD', cmd
         _logger.debug('Running cmd: %s', ' '.join(cmd))

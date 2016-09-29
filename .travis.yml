@@ -8,7 +8,7 @@ cache:
 
 language: python
 python:
-  - "2.6"
+  - "2.7"
   - "3.3"
 
 # command to install dependencies
@@ -16,13 +16,11 @@ before_install:
 # Install miniconda to avoid compiling scipy
   - mkdir -p download
   - cd download
-  - wget -c http://repo.continuum.io/miniconda/Miniconda-latest-Linux-x86_64.sh -O miniconda.sh
+  - wget -c https://repo.continuum.io/miniconda/Miniconda2-4.1.11-Linux-x86_64.sh -O miniconda.sh
   - chmod +x miniconda.sh
   - ./miniconda.sh -b
   - cd ..
   - export PATH=/home/travis/miniconda2/bin:$PATH
-  - conda update --yes conda
-  - conda install --yes conda=3.19
 
 addons:
   apt_packages:
@@ -32,12 +30,13 @@ addons:
    - dvipng
 
 install:
-  - if [[ $TRAVIS_PYTHON_VERSION == '2.6' ]]; then conda create --yes -q -n pyenv mkl python=2.6 numpy=1.7.1 scipy=0.11 nose=1.3.0 pyparsing=1.5 pip flake8=2.3 six=1.9.0 pep8=1.6.2 pyflakes=0.8.1 sphinx; fi
-  - if [[ $TRAVIS_PYTHON_VERSION == '3.3' ]]; then conda create --yes -q -n pyenv mkl python=3.3 numpy=1.9.1 scipy=0.14.0 nose=1.3.4 pyparsing=1.5 pip flake8=2.3 six=1.9.0 pep8=1.6.2 pyflakes=0.8.1 sphinx; fi
+# In Python 3.3, we test the min version of NumPy and SciPy. In Python 2.7, we test more recent version.
+  - if [[ $TRAVIS_PYTHON_VERSION == '2.7' ]]; then conda create --yes -q -n pyenv mkl python=2.7 numpy=1.9.1 scipy=0.14.0 nose=1.3.0 pip flake8=2.3 six=1.9.0 pep8=1.6.2 pyflakes=0.8.1 sphinx mkl-service libgfortran=1; fi
+  - if [[ $TRAVIS_PYTHON_VERSION == '3.3' ]]; then conda create --yes -q -n pyenv mkl python=3.3 numpy=1.9.1 scipy=0.14.0 nose=1.3.4 pip flake8=2.3 six=1.9.0 pep8=1.6.2 pyflakes=0.8.1 sphinx mkl-service; fi
   - source activate pyenv
-  - if [[ $TRAVIS_PYTHON_VERSION == '2.6' ]]; then pip install pydot; fi
+  - if [[ $TRAVIS_PYTHON_VERSION == '2.7' ]]; then pip install pydot; else pip install pydot-ng; fi
   - pip install . --no-deps
-  - pip install flake8-future-import
+  - pip install flake8-future-import nose-parameterized==0.5.0 sphinx_rtd_theme
 
 # command to run tests
 env:
@@ -50,7 +49,7 @@ matrix:
   include:
     - python: "3.3"
       env: PART="-e test_flake8.py ." THEANO_FLAGS="mode=FAST_COMPILE"
-    - python: "2.6"
+    - python: "2.7"
       env: PART="-e test_flake8.py ." THEANO_FLAGS="mode=FAST_COMPILE,floatX=float32"
 
 script:

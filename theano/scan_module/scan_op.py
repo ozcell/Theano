@@ -60,6 +60,7 @@ import copy
 import itertools
 import logging
 import time
+from collections import OrderedDict
 
 import numpy
 from six import iteritems, integer_types
@@ -73,7 +74,7 @@ from theano import compile, config, gradient, gof, tensor
 from theano.gof import PureOp, Apply
 from theano.gof.graph import io_connection_pattern
 from theano.gof.toolbox import NoOutputFromInplace
-from theano.compat import OrderedDict, izip
+from theano.compat import izip
 from theano.tensor import TensorType
 from theano.tensor.opt import Shape_i
 from theano.gradient import grad_undefined, DisconnectedType, NullType
@@ -272,7 +273,7 @@ class Scan(PureOp):
         # If scan has the flag 'gpua' set to false (meaning that is shouldn't
         # use the gpuarray gpu backend ), ensure that is has no input and no
         # output with type GpuArrayType
-        from theano.sandbox.gpuarray import GpuArrayType
+        from theano.gpuarray import GpuArrayType
         if not self.info.get("gpua", False):
             for inp in self.inputs:
                 if isinstance(inp.type, GpuArrayType):
@@ -2024,7 +2025,7 @@ class Scan(PureOp):
             # it will be the sum of the external gradient signal and the
             # gradient obtained by propagating Y's external gradient signal
             # to X.
-            known_grads = dict([(k.copy(), v) for (k, v) in known_grads.items()])
+            known_grads = OrderedDict([(k.copy(), v) for (k, v) in known_grads.items()])
 
             grads = gradient.grad(
                         cost=None,
@@ -2094,7 +2095,7 @@ class Scan(PureOp):
             dC_dXts.append(dC_dXt)
 
 
-        known_grads = {}
+        known_grads = OrderedDict()
         dc_dxts_idx = 0
         for i in range(len(diff_outputs)):
             if i < idx_nitsot_start or i >= idx_nitsot_end:

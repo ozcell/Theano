@@ -27,6 +27,9 @@ logger = logging.getLogger(__name__)
 
 def calculate_reallocate_info(order, fgraph, storage_map, compute_map_re,
                               dependencies):
+    """
+    WRITEME : explain the parameters
+    """
     reallocated_info = {}
     viewed_by = {}
     for var in fgraph.variables:
@@ -189,7 +192,9 @@ class VM(object):
         raise NotImplementedError('override me')
 
     def update_profile(self, profile):
-        # accumulate into the profile object
+        """
+        Accumulate into the profile object
+        """
         for node, thunk, t, c in zip(self.nodes, self.thunks,
                                      self.call_times, self.call_counts):
             profile.apply_time.setdefault(node, 0.0)
@@ -327,7 +332,8 @@ class Stack(VM):
 
     def __init__(self, nodes, thunks, pre_call_clear,
                  storage_map, compute_map, fgraph, allow_gc,
-                 dependencies=None, callback=None):
+                 n_updates, dependencies=None, callback=None,
+                 callback_input=None):
         super(Stack, self).__init__(nodes, thunks, pre_call_clear)
 
         self.allow_gc = allow_gc
@@ -340,6 +346,8 @@ class Stack(VM):
         self.compute_map = compute_map
         self.node_idx = node_idx = {}
         self.callback = callback
+        self.callback_input = callback_input
+        self.n_updates = n_updates
 
         ords = fgraph.orderings()
 
@@ -396,7 +404,7 @@ class Stack(VM):
             )
         return rval, dt
 
-    def __call__(self):
+    def __call__(self, output_subset=None):
         storage_map = self.storage_map
         compute_map = self.compute_map
         thunks = self.thunks
@@ -406,12 +414,23 @@ class Stack(VM):
 
         for k in self.storage_map:
             compute_map[k][0] = (k.owner is None)
+            if self.callback_input and compute_map[k][0]:
+                self.callback_input(k, self.storage_map[k][0])
 
         # apply_stack contains nodes
-        apply_stack = list(self.base_apply_stack)
+        if output_subset is not None:
+            first_updated = len(self.outputs) - self.n_updates
+            output_subset = output_subset + list(range(first_updated,
+                                                       len(self.outputs)))
+            apply_stack =\
+                [self.outputs[i].owner for i in output_subset
+                    if self.outputs[i].owner]
+        else:
+            apply_stack = list(self.base_apply_stack)
+
         last_apply_stack_len = -1
 
-        # This record all function inputs/shared varibles and constants
+        # This record all function inputs/shared variables and constants
         for var, data in iteritems(self.storage_map):
             if data[0] is None:
                 continue
@@ -673,6 +692,11 @@ class VM_Linker(link.LocalLinker):
         A callable object to call after each call to a thunk within
         the virtual machine.  It will be called with four arguments called
         'node', 'thunk', 'storage_map', and 'compute_map'.
+    callback_input
+        A callable object to call on each input to the graph
+        (variables with no owner).  This includes constants and shared
+        variables values.  It will be called with two arguments:
+        'var', 'value'.
     lazy
         Useful only when use_cloop is False. When lazy is None, use the
         theano flag vm.lazy value. Then if we have a None (default) we auto
@@ -682,11 +706,15 @@ class VM_Linker(link.LocalLinker):
     c_thunks
         If None or True, don't change the default. If False,
         don't compile c code for the thunks.
+    allow_partial_eval
+        If True, enforces usage of Stack or CVM, to allow for partial
+        evaluation of functions (calculating a subset of outputs).
 
     """
 
     def __init__(self, allow_gc=None, use_cloop=False, callback=None,
-                 lazy=None, schedule=None, c_thunks=None):
+                 callback_input=None, lazy=None, schedule=None,
+                 c_thunks=None, allow_partial_eval=None):
         # Note: if more parameters are added to __init__, make sure to forward
         # them in the "type(self)(...)" call in the "accept" method below.
         if allow_gc is None:
@@ -695,14 +723,19 @@ class VM_Linker(link.LocalLinker):
         self.allow_gc = allow_gc
         self.use_cloop = use_cloop
         self.callback = callback
+        self.callback_input = callback_input
         self.lazy = lazy
         self.c_thunks = c_thunks
+        self.allow_partial_eval = allow_partial_eval
         self.updated_vars = {}
         if schedule:
             self.schedule = schedule
 
-    def accept(self, fgraph, no_recycling=None):
+    def accept(self, fgraph, no_recycling=None, profile=None):
         """
+        Check if fgraph is the first FunctionGraph that has ever been
+        associated to self, else, create a new VM_Linker
+        associated to fgraph
 
         Parameters
         ----------
@@ -741,12 +774,16 @@ class VM_Linker(link.LocalLinker):
                 allow_gc=self.allow_gc,
                 use_cloop=self.use_cloop,
                 callback=self.callback,
+                callback_input=self.callback_input,
                 lazy=self.lazy,
                 schedule=self.schedule,
                 c_thunks=self.c_thunks,
-            ).accept(fgraph, no_recycling)
+                allow_partial_eval=self.allow_partial_eval
+            ).accept(fgraph, no_recycling, profile)
         self.fgraph = fgraph
         self.no_recycling = no_recycling
+        self.profile = profile
+
         return self
 
     def accept_var_updates(self, updated_vars):
@@ -810,22 +847,30 @@ class VM_Linker(link.LocalLinker):
 
         pre_call_clear = [storage_map[v] for v in self.no_recycling]
 
-        if (self.callback is not None or
-                (config.profile and config.profile_memory)):
+        if (self.callback is not None or self.callback_input is not None or
+                (config.profile and config.profile_memory) or
+                (self.allow_partial_eval and not self.use_cloop)):
 
-            if self.use_cloop and self.callback is not None:
+            if self.use_cloop and (self.callback is not None or
+                                   self.callback_input is not None):
                 logger.warn('CVM does not support callback, using Stack VM.')
             if self.use_cloop and config.profile_memory:
                 warnings.warn(
                     'CVM does not support memory profile, using Stack VM.')
+            if not self.use_cloop and self.allow_partial_eval:
+                warnings.warn(
+                    'LoopGC does not support partial evaluation, '
+                    'using Stack VM.')
             # Needed for allow_gc=True, profiling and storage_map reuse
             deps = self.compute_gc_dependencies(storage_map)
             vm = Stack(
                 nodes, thunks, pre_call_clear,
                 storage_map, compute_map,
                 self.fgraph, self.allow_gc,
+                len(updated_vars),
                 dependencies=deps,
-                callback=self.callback)
+                callback=self.callback,
+                callback_input=self.callback_input)
         elif self.use_cloop:
             # create a map from nodes to ints and vars to ints
             nodes_idx = {}
@@ -963,7 +1008,8 @@ class VM_Linker(link.LocalLinker):
                     nodes, thunks, pre_call_clear,
                     storage_map, compute_map,
                     self.fgraph, self.allow_gc,
-                    dependencies=deps
+                    len(updated_vars),
+                    dependencies=deps,
                 )
         return vm
 
@@ -994,7 +1040,7 @@ class VM_Linker(link.LocalLinker):
 
         reallocated_info = calculate_reallocate_info(
             order, fgraph, storage_map, compute_map_re, dependencies)
-
+        t0 = time.time()
         for node in order:
             try:
                 if self.c_thunks is False:
@@ -1012,6 +1058,11 @@ class VM_Linker(link.LocalLinker):
                 e.args = ("The following error happened while"
                           " compiling the node", node, "\n") + e.args
                 raise
+        t1 = time.time()
+
+        if self.profile:
+            self.profile.linker_node_make_thunks += t1 - t0
+
         for node, thunk in zip(order, thunks):
             thunk.inputs = [storage_map[v] for v in node.inputs]
             thunk.outputs = [storage_map[v] for v in node.outputs]
@@ -1022,7 +1073,7 @@ class VM_Linker(link.LocalLinker):
         if lazy is None:
             lazy = not all([(not th.lazy) for th in thunks])
         if not (lazy or (config.profile and config.profile_memory) or
-                self.use_cloop or self.callback):
+                self.use_cloop or self.callback or self.callback_input):
             for pair in itervalues(reallocated_info):
                 storage_map[pair[1]] = storage_map[pair[0]]
 
@@ -1050,6 +1101,7 @@ class VM_Linker(link.LocalLinker):
                           )
 
         vm.storage_map = storage_map
+        vm.compute_map = compute_map
 
         return (vm,
                 [link.Container(input, storage)
@@ -1063,3 +1115,7 @@ class VM_Linker(link.LocalLinker):
         self.__dict__.update(d)
         if not hasattr(self, 'c_thunks'):
             self.c_thunks = True
+        if not hasattr(self, 'allow_partial_eval'):
+            self.allow_partial_eval = None
+        if not hasattr(self, 'callback_input'):
+            self.callback_input = None

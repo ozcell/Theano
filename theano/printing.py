@@ -23,19 +23,34 @@ from theano.compile import Function, debugmode, SharedVariable
 from theano.compile.profilemode import ProfileMode
 
 pydot_imported = False
+pydot_imported_msg = ""
 try:
     # pydot-ng is a fork of pydot that is better maintained
     import pydot_ng as pd
     if pd.find_graphviz():
         pydot_imported = True
+    else:
+        pydot_imported_msg = "pydot-ng can't find graphviz. Install graphviz."
 except ImportError:
     try:
         # fall back on pydot if necessary
         import pydot as pd
-        if pd.find_graphviz():
+        if hasattr(pd, 'find_graphviz'):
+            if pd.find_graphviz():
+                pydot_imported = True
+            else:
+                pydot_imported_msg = "pydot can't find graphviz"
+        else:
+            pd.Dot.create(pd.Dot())
             pydot_imported = True
     except ImportError:
-        pass  # tests should not fail on optional dependency
+        # tests should not fail on optional dependency
+        pydot_imported_msg = ("Install the python package pydot or pydot-ng."
+                              " Install graphviz.")
+    except Exception as e:
+        pydot_imported_msg = "An error happened while importing/trying pydot: "
+        pydot_imported_msg += str(e.args)
+
 
 _logger = logging.getLogger("theano.printing")
 VALID_ASSOC = set(['left', 'right', 'either'])
@@ -43,7 +58,8 @@ VALID_ASSOC = set(['left', 'right', 'either'])
 
 def debugprint(obj, depth=-1, print_type=False,
                file=None, ids='CHAR', stop_on_name=False,
-               done=None, print_storage=False):
+               done=None, print_storage=False, print_clients=False,
+               used_ids=None):
     """Print a computation graph as text to stdout or a file.
 
     :type obj: Variable, Apply, or Function instance
@@ -69,6 +85,13 @@ def debugprint(obj, depth=-1, print_type=False,
     :param print_storage: If True, this will print the storage map
         for Theano functions. Combined with allow_gc=False, after the
         execution of a Theano function, we see the intermediate result.
+    :type print_clients: bool
+    :param print_clients: If True, this will print for Apply node that
+         have more then 1 clients its clients. This help find who use
+         an Apply node.
+    :type used_ids: dict or None
+    :param used_ids: the id to use for some object, but maybe we only
+         refered to it yet.
 
     :returns: string if `file` == 'str', else file arg
 
@@ -98,6 +121,9 @@ def debugprint(obj, depth=-1, print_type=False,
         _file = file
     if done is None:
         done = dict()
+    if used_ids is None:
+        used_ids = dict()
+    used_ids = dict()
     results_to_print = []
     profile_list = []
     order = []  # Toposort
@@ -178,7 +204,8 @@ N.B.:
         debugmode.debugprint(r, depth=depth, done=done, print_type=print_type,
                              file=_file, order=o, ids=ids,
                              scan_ops=scan_ops, stop_on_name=stop_on_name,
-                             profile=p, smap=s)
+                             profile=p, smap=s, used_ids=used_ids,
+                             print_clients=print_clients)
 
     if len(scan_ops) > 0:
         print("", file=_file)
@@ -208,7 +235,8 @@ N.B.:
                 file=_file, ids=ids,
                 scan_ops=scan_ops,
                 stop_on_name=stop_on_name,
-                scan_inner_to_outer_inputs=inner_to_outer_inputs)
+                scan_inner_to_outer_inputs=inner_to_outer_inputs,
+                print_clients=print_clients, used_ids=used_ids)
             if hasattr(s.owner.op, 'fn'):
                 # If the op was compiled, print the optimized version.
                 outputs = s.owner.op.fn.maker.fgraph.outputs
@@ -227,7 +255,8 @@ N.B.:
                     ids=ids, stop_on_name=stop_on_name,
                     prefix_child=new_prefix_child,
                     scan_ops=scan_ops,
-                    scan_inner_to_outer_inputs=inner_to_outer_inputs)
+                    scan_inner_to_outer_inputs=inner_to_outer_inputs,
+                    print_clients=print_clients, used_ids=used_ids)
 
     if file is _file:
         return file
@@ -316,6 +345,11 @@ class PrinterState(gof.utils.scratchpad):
         else:
             self.__dict__.update(props)
         self.__dict__.update(more_props)
+        # A dict from the object to print to its string
+        # representation. If it is a dag and not a tree, it allow to
+        # parse each node of the graph only once. They will still be
+        # printed many times
+        self.memo = {}
 
     def clone(self, props=None, **more_props):
         if props is None:
@@ -332,6 +366,8 @@ class OperatorPrinter:
         assert self.assoc in VALID_ASSOC
 
     def process(self, output, pstate):
+        if output in pstate.memo:
+            return pstate.memo[output]
         pprinter = pstate.pprinter
         node = output.owner
         if node is None:
@@ -364,9 +400,11 @@ class OperatorPrinter:
         else:
             s = (" %s " % self.operator).join(input_strings)
         if parenthesize:
-            return "(%s)" % s
+            r = "(%s)" % s
         else:
-            return s
+            r = s
+        pstate.memo[output] = r
+        return r
 
 
 class PatternPrinter:
@@ -380,6 +418,8 @@ class PatternPrinter:
                 self.patterns.append((pattern[0], pattern[1:]))
 
     def process(self, output, pstate):
+        if output in pstate.memo:
+            return pstate.memo[output]
         pprinter = pstate.pprinter
         node = output.owner
         if node is None:
@@ -396,7 +436,9 @@ class PatternPrinter:
                  for i, x in enumerate(pp_process(input, precedence)
                                        for input, precedence in
                                        zip(node.inputs, precedences)))
-        return pattern % d
+        r = pattern % d
+        pstate.memo[output] = r
+        return r
 
 
 class FunctionPrinter:
@@ -405,6 +447,8 @@ class FunctionPrinter:
         self.names = names
 
     def process(self, output, pstate):
+        if output in pstate.memo:
+            return pstate.memo[output]
         pprinter = pstate.pprinter
         node = output.owner
         if node is None:
@@ -412,40 +456,27 @@ class FunctionPrinter:
                             "not the result of an operation" % self.names)
         idx = node.outputs.index(output)
         name = self.names[idx]
-        return "%s(%s)" % (name, ", ".join(
+        r = "%s(%s)" % (name, ", ".join(
             [pprinter.process(input, pstate.clone(precedence=-1000))
              for input in node.inputs]))
-
-
-class MemberPrinter:
-
-    def __init__(self, *names):
-        self.names = names
-
-    def process(self, output, pstate):
-        pprinter = pstate.pprinter
-        node = output.owner
-        if node is None:
-            raise TypeError("function %s cannot represent a variable that is"
-                            " not the result of an operation" % self.function)
-        idx = node.outputs.index(output)
-        name = self.names[idx]
-        input = node.inputs[0]
-        return "%s.%s" % (pprinter.process(input,
-                                           pstate.clone(precedence=1000)),
-                          name)
+        pstate.memo[output] = r
+        return r
 
 
 class IgnorePrinter:
 
     def process(self, output, pstate):
+        if output in pstate.memo:
+            return pstate.memo[output]
         pprinter = pstate.pprinter
         node = output.owner
         if node is None:
             raise TypeError("function %s cannot represent a variable that is"
                             " not the result of an operation" % self.function)
         input = node.inputs[0]
-        return "%s" % pprinter.process(input, pstate)
+        r = "%s" % pprinter.process(input, pstate)
+        pstate.memo[output] = r
+        return r
 
 
 class DefaultPrinter:
@@ -453,22 +484,30 @@ class DefaultPrinter:
     def __init__(self):
         pass
 
-    def process(self, r, pstate):
+    def process(self, output, pstate):
+        if output in pstate.memo:
+            return pstate.memo[output]
         pprinter = pstate.pprinter
-        node = r.owner
+        node = output.owner
         if node is None:
-            return LeafPrinter().process(r, pstate)
-        return "%s(%s)" % (str(node.op), ", ".join(
+            return LeafPrinter().process(output, pstate)
+        r = "%s(%s)" % (str(node.op), ", ".join(
             [pprinter.process(input, pstate.clone(precedence=-1000))
              for input in node.inputs]))
+        pstate.memo[output] = r
+        return r
 
 
 class LeafPrinter:
-    def process(self, r, pstate):
-        if r.name in greek:
-            return greek[r.name]
+    def process(self, output, pstate):
+        if output in pstate.memo:
+            return pstate.memo[output]
+        if output.name in greek:
+            r = greek[output.name]
         else:
-            return str(r)
+            r = str(output)
+        pstate.memo[output] = r
+        return r
 
 
 class PPrinter:
@@ -726,8 +765,10 @@ def pydotprint(fct, outfile=None,
         outputs = fct.outputs
         topo = fct.toposort()
     if not pydot_imported:
-        raise RuntimeError("Failed to import pydot. You must install pydot"
-                           " and graphviz for `pydotprint` to work.")
+        raise RuntimeError("Failed to import pydot. You must install graphviz"
+                           " and either pydot or pydot-ng for "
+                           "`pydotprint` to work.",
+                           pydot_imported_msg)
 
     g = pd.Dot()
 
@@ -1062,7 +1103,8 @@ def pydotprint_variables(vars,
                                config.device + '.' + format)
     if not pydot_imported:
         raise RuntimeError("Failed to import pydot. You must install pydot"
-                           " and graphviz for `pydotprint_variables` to work.")
+                           " and graphviz for `pydotprint_variables` to work.",
+                           pydot_imported_msg)
     if pd.__name__ == "pydot_ng":
         raise RuntimeError("pydotprint_variables do not support pydot_ng."
                            "pydotprint_variables is also deprecated, "

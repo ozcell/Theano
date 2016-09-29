@@ -86,15 +86,20 @@ def execute(execute=True, verbose=True, M=2000, N=2000, K=2000,
     t0 = 0
     t1 = -1
 
+    f()  # Ignore first function call to get representative time.
     if execute:
         sync = (hasattr(theano, "sandbox") and
                 hasattr(theano.sandbox, "cuda") and
-                theano.sandbox.cuda.cuda_available)
+                isinstance(c, theano.sandbox.cuda.CudaNdarraySharedVariable))
+        sync2 = (hasattr(theano, "gpuarray") and
+                 isinstance(c, theano.gpuarray.GpuArraySharedVariable))
         t0 = time.time()
         for i in range(iters):
             f()
         if sync:
             theano.sandbox.cuda.synchronize()
+        if sync2:
+            c.get_value(borrow=True, return_internal_type=True).sync()
         t1 = time.time()
     return t1 - t0, impl
 
@@ -232,7 +237,7 @@ if __name__ == "__main__":
         GT 610            2.38s
         GTX 550 Ti                                                  0.57s
         GT 520                                        2.68s                3.06s
-        520M                                   2.44s                       3.19s        # with bumblebee on Ubuntu 12.04
+        GT 520M                                2.44s                       3.19s        # with bumblebee on Ubuntu 12.04
         GT 220                                                             3.80s
         GT 210                                                      6.35s
         8500 GT                                                                   10.68s
@@ -244,6 +249,7 @@ if __name__ == "__main__":
 
         cuda version      7.5    7.0    6.5
         gpu
+        M40               0.47s
         k80               0.96s
         K6000/NOECC              0.69s
         K40                             0.88s
@@ -264,7 +270,7 @@ if __name__ == "__main__":
         GTX 780
         GTX 980 Ti        0.41s
         GTX 980
-        GTX 970
+        GTX 970           0.66s
         GTX 680                  1.57s
         GRID K520
         GTX 750 Ti        2.01s  2.01s

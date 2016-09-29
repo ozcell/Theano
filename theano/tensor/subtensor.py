@@ -398,7 +398,7 @@ class Subtensor(Op):
             raise AdvancedIndexingError(Subtensor.e_indextype, entry)
 
     def get_constant_idx(self, inputs, allow_partial=False,
-                         only_process_constants=False):
+                         only_process_constants=False, elemwise=True):
         """
         Return the idx_list with constant inputs replaced by their
         python scalar equivalent.
@@ -442,7 +442,8 @@ class Subtensor(Op):
                 try:
                     return get_scalar_constant_value(
                         val,
-                        only_process_constants=only_process_constants)
+                        only_process_constants=only_process_constants,
+                        elemwise=elemwise)
                 except theano.tensor.NotScalarConstantError:
                     if allow_partial:
                         return val
@@ -1170,7 +1171,7 @@ def inc_subtensor(x, y, inplace=False, set_instead_of_inc=False,
             # This if is needed to prevent some useless warning about
             # old code bug.
             expanded_y = alloc(y, *[x.shape[i] for i in xrange(x.ndim)])
-            flattened_y = expanded_y.flatten(inner_x.ndim)
+            flattened_y = expanded_y.reshape(inner_x.shape)
         else:
             flattened_y = y
 
@@ -1982,7 +1983,7 @@ class AdvancedIncSubtensor1(Op):
         """ % locals()
 
     def c_code_cache_version(self):
-        return (2,)
+        return (3,)
 
     def perform(self, node, inp, out_):
         # TODO opt to make this inplace

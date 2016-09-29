@@ -20,10 +20,11 @@ from six.moves import xrange
 import theano
 from theano import gof
 from theano import scalar
-from theano.tensor import basic as tensor, subtensor, opt
+from theano.tensor import extra_ops
+from theano.gof.opt import copy_stack_trace
+from theano.tensor import basic as tensor, subtensor, opt, elemwise
 from theano.tensor.type import (values_eq_approx_remove_inf,
                                 values_eq_approx_remove_nan)
-from theano.tensor.opt import copy_stack_trace
 from theano.compile import optdb
 from theano.gof import Apply
 
@@ -31,7 +32,6 @@ from theano.tensor.nnet.sigm import sigmoid, softplus
 from theano.gradient import DisconnectedType
 from theano.gradient import grad_not_implemented
 from theano.tensor.nnet.blocksparse import sparse_block_dot
-
 
 ############
 #
@@ -905,9 +905,11 @@ def softmax_simplifier(numerators, denominators):
                                 matching_denom = denominator
                                 break
         if matching_denom:
+            softmax = softmax_op(x)
+            copy_stack_trace(numerator, softmax)
             numerators.remove(numerator)
             denominators.remove(matching_denom)
-            numerators.append(softmax_op(x))
+            numerators.append(softmax)
 
     return numerators, denominators
 opt.local_mul_canonizer.add_simplifier(softmax_simplifier, 'softmax_simplifier')
@@ -2220,6 +2222,10 @@ def relu(x, alpha=0):
     if alpha == 0:
         return 0.5 * (x + abs(x))
     else:
+        # We can't use 0.5 and 1 for one and half.  as if alpha is a
+        # numpy dtype, they will be considered as float64, so would
+        # cause upcast to float64.
+        alpha = tensor.as_tensor_variable(alpha)
         f1 = 0.5 * (1 + alpha)
         f2 = 0.5 * (1 - alpha)
         return f1 * x + f2 * abs(x)
@@ -2366,3 +2372,91 @@ def elu(x, alpha=1):
         Exponential Linear Units (ELUs)" <http://arxiv.org/abs/1511.07289>`.
     """
     return tensor.switch(x > 0, x, alpha * (tensor.exp(x) - 1))
+
+
+class ScalarSoftsign(theano.scalar.UnaryScalarOp):
+    """
+    Softsign activation function
+    :math:`\\varphi(\\mathbf{x}) = \\frac{1}{1+|x|}`
+
+    """
+    @staticmethod
+    def static_impl(x):
+        return x / (1.0 + abs(x))
+
+    def impl(self, x):
+        return ScalarSoftsign.static_impl(x)
+
+    def grad(self, inp, grads):
+        x, = inp
+        gz, = grads
+        if 'float' in x.type.dtype:
+            d = (1.0 + abs(x))
+            return [gz / (d * d)]
+        else:
+            return NotImplemented
+
+    def c_code(self, node, name, inp, out, sub):
+        x, = inp
+        z, = out
+        if node.inputs[0].type in [theano.scalar.float32,
+                                   theano.scalar.float64]:
+            return "%(z)s = %(x)s / (1.0+fabs(%(x)s));" % locals()
+        raise NotImplementedError('only floating point x is implemented')
+
+scalar_softsign = ScalarSoftsign(theano.scalar.upgrade_to_float,
+                                 name='scalar_softsign')
+softsign = elemwise.Elemwise(scalar_softsign, name='softsign')
+
+
+def confusion_matrix(actual, pred):
+    """
+    Computes the confusion matrix of given vectors containing
+    actual observations and predicted observations.
+
+    Parameters
+    ----------
+    actual : 1-d tensor variable
+    pred : 1-d tensor variable
+
+    Returns
+    -------
+    conf_mat : Confusion matrix of actual and predictions observations as shown below.
+
+               | Predicted
+    ___________|___________
+       Actual  |
+               |
+
+    order : 1-d array of order of entries in rows and columns
+
+    Examples
+    --------
+    >>> import theano
+    >>> from theano.tensor.nnet import confusion_matrix
+
+    >>> x = theano.tensor.vector()
+    >>> y = theano.tensor.vector()
+    >>> f = theano.function([x, y], confusion_matrix(x, y))
+    >>> y_true = [2, 0, 2, 2, 0, 1]
+    >>> y_pred = [0, 0, 2, 2, 0, 2]
+    >>> print(f(y_true, y_pred))
+    [array([[2, 0, 0],
+       [0, 0, 1],
+       [1, 0, 2]]), array([ 0.,  1.,  2.])]
+    """
+    if actual.ndim != 1:
+        raise ValueError('actual must be 1-d tensor variable')
+    if pred.ndim != 1:
+        raise ValueError('pred must be 1-d tensor variable')
+
+    order = extra_ops.Unique(False, False, False)(tensor.concatenate([actual, pred]))
+
+    colA = actual.dimshuffle(0, 'x')
+    colP = pred.dimshuffle(0, 'x')
+
+    oneHotA = tensor.eq(colA, order).astype('int64')
+    oneHotP = tensor.eq(colP, order).astype('int64')
+
+    conf_mat = tensor.dot(oneHotA.T, oneHotP)
+    return [conf_mat, order]

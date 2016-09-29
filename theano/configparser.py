@@ -8,8 +8,9 @@ import os
 import shlex
 import sys
 import warnings
+from functools import wraps
 
-from six import StringIO
+from six import StringIO, PY3
 
 import theano
 from theano.compat import configparser as ConfigParser
@@ -72,7 +73,8 @@ def config_files_from_theanorc():
 
 
 config_files = config_files_from_theanorc()
-theano_cfg = ConfigParser.SafeConfigParser(
+theano_cfg = (ConfigParser.ConfigParser if PY3
+              else ConfigParser.SafeConfigParser)(
     {'USER': os.getenv("USER", os.path.split(os.path.expanduser('~'))[-1]),
      'LSCRATCH': os.getenv("LSCRATCH", ""),
      'TMPDIR': os.getenv("TMPDIR", ""),
@@ -96,6 +98,7 @@ def change_flags(**kwargs):
     Useful during tests.
     """
     def change_flags_exec(f):
+        @wraps(f)
         def inner(*args, **kwargs_):
             old_val = {}
             for k in kwargs:
@@ -116,9 +119,6 @@ def change_flags(**kwargs):
                          if v.fullname == k]
                     assert len(l) == 1
                     l[0].__set__(None, old_val[k])
-
-        # Make sure that the name of the decorated function remains the same.
-        inner.__name__ = f.__name__
 
         return inner
     return change_flags_exec

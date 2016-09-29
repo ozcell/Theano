@@ -14,21 +14,11 @@ from theano import gof
 from theano.compile.profilemode import ProfileMode
 from theano.compile import Function
 from theano.compile import builders
-
-pydot_imported = False
+from theano.printing import pydot_imported, pydot_imported_msg
 try:
-    # pydot-ng is a fork of pydot that is better maintained
-    import pydot_ng as pd
-    if pd.find_graphviz():
-        pydot_imported = True
+    from theano.printing import pd
 except ImportError:
-    try:
-        # fall back on pydot if necessary
-        import pydot as pd
-        if pd.find_graphviz():
-            pydot_imported = True
-    except ImportError:
-        pass  # tests should not fail on optional dependency
+    pass
 
 
 class PyDotFormatter(object):
@@ -52,8 +42,8 @@ class PyDotFormatter(object):
     def __init__(self, compact=True):
         """Construct PyDotFormatter object."""
         if not pydot_imported:
-            raise ImportError('Failed to import pydot. You must install pydot'
-                              ' and graphviz for `PyDotFormatter` to work.')
+            raise ImportError('Failed to import pydot. ' +
+                              pydot_imported_msg)
 
         self.compact = compact
         self.node_colors = {'input': 'limegreen',
@@ -306,7 +296,10 @@ def var_tag(var):
     """Parse tag attribute of variable node."""
     tag = var.tag
     if hasattr(tag, 'trace') and len(tag.trace) and len(tag.trace[0]) == 4:
-        path, line, _, src = tag.trace[0]
+        if isinstance(tag.trace[0][0], (tuple, list)):
+            path, line, _, src = tag.trace[0][-1]
+        else:
+            path, line, _, src = tag.trace[0]
         path = os.path.basename(path)
         path = path.replace('<', '')
         path = path.replace('>', '')

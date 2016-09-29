@@ -4,7 +4,6 @@ import logging
 import os
 import subprocess
 import sys
-import warnings
 from locale import getpreferredencoding
 
 import numpy
@@ -249,8 +248,9 @@ class NVCC_compiler(Compiler):
             _logger.debug('Writing module C++ code to %s', cppfilename)
             cppfile.write(src_code)
 
-        lib_filename = os.path.join(location, '%s.%s' %
-                (module_name, get_lib_extension()))
+        lib_filename = os.path.join(
+            location, '%s.%s' %
+            (module_name, get_lib_extension()))
 
         _logger.debug('Generating shared lib %s', lib_filename)
         # TODO: Why do these args cause failure on gtx285 that has 1.3
@@ -268,10 +268,10 @@ class NVCC_compiler(Compiler):
                 continue
             for pattern in ['-O', '-arch=', '-ccbin=', '-G', '-g', '-I',
                             '-L', '--fmad', '--ftz', '--maxrregcount',
-                            '--prec-div', '--prec-sqrt',  '--use_fast_math',
+                            '--prec-div', '--prec-sqrt', '--use_fast_math',
                             '-fmad', '-ftz', '-maxrregcount',
                             '-prec-div', '-prec-sqrt', '-use_fast_math',
-                            '--use-local-env', '--cl-version=']:
+                            '--use-local-env', '--cl-version=', '-std=']:
 
                 if pa.startswith(pattern):
                     preargs1.append(pa)
@@ -311,7 +311,7 @@ class NVCC_compiler(Compiler):
         # https://wiki.debian.org/RpathIssue for details.
 
         if (not type(config.cuda).root.is_default and
-            os.path.exists(os.path.join(config.cuda.root, 'lib'))):
+                os.path.exists(os.path.join(config.cuda.root, 'lib'))):
 
             rpaths.append(os.path.join(config.cuda.root, 'lib'))
             if sys.platform != 'darwin':
@@ -321,10 +321,12 @@ class NVCC_compiler(Compiler):
             # the -rpath option is not understood by the Microsoft linker
             for rpath in rpaths:
                 cmd.extend(['-Xlinker', ','.join(['-rpath', rpath])])
-        cmd.extend('-I%s' % idir for idir in include_dirs)
+        # to support path that includes spaces, we need to wrap it with double quotes on Windows
+        path_wrapper = "\"" if os.name == 'nt' else ""
+        cmd.extend(['-I%s%s%s' % (path_wrapper, idir, path_wrapper) for idir in include_dirs])
+        cmd.extend(['-L%s%s%s' % (path_wrapper, ldir, path_wrapper) for ldir in lib_dirs])
         cmd.extend(['-o', lib_filename])
         cmd.append(os.path.split(cppfilename)[-1])
-        cmd.extend(['-L%s' % ldir for ldir in lib_dirs])
         cmd.extend(['-l%s' % l for l in libs])
         if sys.platform == 'darwin':
             # This tells the compiler to use the already-loaded python
@@ -341,7 +343,7 @@ class NVCC_compiler(Compiler):
                 indexof = cmd.index('-u')
                 cmd.pop(indexof)  # Remove -u
                 cmd.pop(indexof)  # Remove argument to -u
-            except ValueError as e:
+            except ValueError:
                 done = True
 
         # CUDA Toolkit v4.1 Known Issues:
@@ -359,7 +361,7 @@ class NVCC_compiler(Compiler):
         try:
             os.chdir(location)
             p = subprocess.Popen(
-                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             nvcc_stdout_raw, nvcc_stderr_raw = p.communicate()[:2]
             console_encoding = getpreferredencoding()
             nvcc_stdout = decode_with(nvcc_stdout_raw, console_encoding)
@@ -404,7 +406,8 @@ class NVCC_compiler(Compiler):
         elif config.cmodule.compilation_warning and nvcc_stdout:
             print(nvcc_stdout)
 
-        if nvcc_stdout:
+        # On Windows, nvcc print useless stuff by default
+        if sys.platform != 'win32' and nvcc_stdout:
             # this doesn't happen to my knowledge
             print("DEBUG: nvcc STDOUT", nvcc_stdout, file=sys.stderr)
 
